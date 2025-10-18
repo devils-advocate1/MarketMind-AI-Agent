@@ -237,7 +237,7 @@ with st.form("qa_form"):
     submitted_qa = st.form_submit_button("Ask Agent")
 if submitted_qa and user_question and not df_reddit.empty:
     with st.spinner("Thinking..."):
-        context_data = "\n".join(df_reddit['title'].dropna().astype(str) + ": " + df_reddit['text'].dropna().astype(str))
+        context_data = "\n".join([str(item) for item in df_reddit['title'].dropna()]) # Explicitly converts each item
         ai_answer = ask_bedrock_question(user_question, context_data[:15000])
         st.info(f"**🤖 Agent's Answer:**\n\n{ai_answer}")
 st.divider()
