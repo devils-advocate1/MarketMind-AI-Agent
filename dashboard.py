@@ -8,19 +8,37 @@ from wordcloud import WordCloud
 import matplotlib.pyplot as plt
 from datetime import datetime
 import yfinance as yf
-import os
+import os # Import os for debugging
 
-
-st.write("--- Environment Variables ---")
-st.write(f"AWS Access Key ID Env Var Set: {'AWS_ACCESS_KEY_ID' in os.environ}")
-st.write(f"AWS Secret Key Env Var Set: {'AWS_SECRET_ACCESS_KEY' in os.environ}")
-st.write(f"AWS Region Env Var Set: {'AWS_DEFAULT_REGION' in os.environ or 'AWS_REGION' in os.environ}")
-st.write("--------------------------")
 # --- AWS & Page Configuration ---
 S3_BUCKET_NAME = "marketmind-raw-data-ramij-2025"
 
-# FIX: Explicitly set the region for the Bedrock client
-bedrock = boto3.client('bedrock-runtime', region_name='ap-south-1') # Ensure this matches your AWS region
+# --- Debugging ---
+# st.write("--- Streamlit Secrets Check ---")
+# if "aws" in st.secrets:
+#     st.write("AWS section found in secrets.")
+#     st.write(f"Access Key ID found: {'aws_access_key_id' in st.secrets['aws']}")
+#     st.write(f"Secret Key found: {'aws_secret_access_key' in st.secrets['aws']}")
+#     st.write(f"Region found: {'region' in st.secrets['aws']}")
+# else:
+#     st.write("AWS section NOT found in secrets!")
+# st.write("--------------------------")
+# --- End Debugging ---
+
+
+# --- FIX: Explicitly pass credentials from st.secrets ---
+try:
+    aws_creds = {
+        "aws_access_key_id": st.secrets["aws"]["aws_access_key_id"],
+        "aws_secret_access_key": st.secrets["aws"]["aws_secret_access_key"],
+        "region_name": st.secrets["aws"]["region"]
+    }
+    # Create clients using the credentials
+    bedrock = boto3.client('bedrock-runtime', **aws_creds)
+    # Note: We'll create S3 clients inside functions as needed, passing creds too.
+except KeyError as e:
+    st.error(f"Error accessing Streamlit Secrets! Make sure '[aws]' section with keys exists. Missing key: {e}")
+    st.stop() # Stop the app if secrets are missing
 
 st.set_page_config(page_title="MarketMind Dashboard", layout="wide")
 st.title("🧠 MarketMind: AI Financial Risk & Sentiment Agent")
@@ -28,45 +46,44 @@ st.write("Live analysis powered by AWS Bedrock & yfinance. Background sentiment 
 
 # --- Helper Functions ---
 
-@st.cache_data(ttl=600) # Cache S3 data for 10 minutes
+@st.cache_data(ttl=600)
 def load_raw_data_with_timestamps(bucket_name):
-    """Loads raw data and extracts timestamps from S3 filenames."""
-    s3 = boto3.client('s3', region_name='ap-south-1') # S3 client usually infers region correctly
+    # Pass credentials explicitly
+    s3 = boto3.client('s3', **aws_creds)
     objects = s3.list_objects_v2(Bucket=bucket_name, Prefix="raw/")
-    if 'Contents' not in objects:
-        return pd.DataFrame()
+    # ... (rest of function is the same)
+    if 'Contents' not in objects: return pd.DataFrame()
     all_posts = []
-    # Load up to 20 recent files to build a trend
     files_to_load = sorted(objects['Contents'], key=lambda x: x['LastModified'], reverse=True)[:20]
     for obj in files_to_load:
         file_key = obj['Key']
         try:
             timestamp_str = file_key.split('_')[-1].replace('.json', '')
             file_timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d-%H-%M-%S')
-        except (IndexError, ValueError):
-            file_timestamp = obj['LastModified']
+        except (IndexError, ValueError): file_timestamp = obj['LastModified']
         response = s3.get_object(Bucket=bucket_name, Key=file_key)
         posts = json.loads(response['Body'].read().decode('utf-8'))
         for post in posts:
-            # Check if 'post' is a dictionary before processing
             if isinstance(post, dict):
                 post['timestamp'] = file_timestamp
                 all_posts.append(post)
     return pd.DataFrame(all_posts)
 
+
 @st.cache_data(ttl=600)
 def load_latest_analysis(bucket_name):
-    """Loads the most recent analysis file from the 'processed/' folder."""
-    s3 = boto3.client('s3', region_name='ap-south-1')
+    # Pass credentials explicitly
+    s3 = boto3.client('s3', **aws_creds)
     objects = s3.list_objects_v2(Bucket=bucket_name, Prefix="processed/")
+    # ... (rest of function is the same)
     if 'Contents' not in objects: return None
     latest_file = max(objects['Contents'], key=lambda x: x['LastModified'])
     response = s3.get_object(Bucket=bucket_name, Key=latest_file['Key'])
     analysis = json.loads(response['Body'].read().decode('utf-8'))
     return analysis
 
+# ... (All other helper functions: analyze_sentiment, get_sentiment_score, ask_bedrock_question, summarize_stock_news, get_data_for_ai_comparison, get_comparative_ai_analysis are the same, they use the global 'bedrock' client which now has credentials) ...
 def analyze_sentiment(text):
-    """Categorizes sentiment into Positive, Negative, or Neutral."""
     if not isinstance(text, str): return "Neutral"
     analysis = TextBlob(text)
     if analysis.sentiment.polarity > 0.1: return "Positive"
@@ -74,12 +91,10 @@ def analyze_sentiment(text):
     else: return "Neutral"
 
 def get_sentiment_score(text):
-    """Gets the raw sentiment polarity score."""
     if not isinstance(text, str): return 0.0
     return TextBlob(text).sentiment.polarity
 
 def ask_bedrock_question(question, context_data):
-    """Answers a user's question based on Reddit context."""
     prompt = f"""Using the following social media data as context, please answer the user's question. Provide a concise, direct answer.
     <context_data>{context_data}</context_data>
     Question: {question}"""
@@ -88,28 +103,23 @@ def ask_bedrock_question(question, context_data):
         "anthropic_version": "bedrock-2023-05-31", "max_tokens": 512,
         "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
     })
+    # bedrock client is now global and created with credentials
     response = bedrock.invoke_model(body=body, modelId=modelId)
     response_body = json.loads(response.get('body').read())
     return response_body.get('content')[0].get('text')
 
 def summarize_stock_news(news_articles):
-    """Sends news articles to Bedrock for a summary."""
     context_data = ""
     for article in news_articles[:5]:
         title = article.get('title', 'No Title Available')
         link = article.get('link', 'No Link Available')
         context_data += f"Title: {title}\nLink: {link}\n\n"
     if not context_data.strip():
-        return "No recent news found to summarize for this ticker."
+        return "No usable news articles found to summarize."
     prompt = f"""
     You are a financial analyst. Based *only* on the following news article titles and links, provide a brief, one-paragraph summary of the current sentiment and key events for this company.
-
-    <news_data>
-    {context_data}
-    </news_data>
-
-    Summary:
-    """
+    <news_data>{context_data}</news_data>
+    Summary:"""
     modelId = 'anthropic.claude-3-sonnet-20240229-v1:0'
     body = json.dumps({
         "anthropic_version": "bedrock-2023-05-31", "max_tokens": 512,
@@ -119,9 +129,8 @@ def summarize_stock_news(news_articles):
     response_body = json.loads(response.get('body').read())
     return response_body.get('content')[0].get('text')
 
-@st.cache_data(ttl=300) # Cache stock data for 5 minutes
+@st.cache_data(ttl=300)
 def get_data_for_ai_comparison(tickers_list):
-    """Fetches key financial metrics and news for a list of tickers."""
     all_data = ""
     for ticker_str in tickers_list:
         try:
@@ -141,20 +150,14 @@ def get_data_for_ai_comparison(tickers_list):
     return all_data
 
 def get_comparative_ai_analysis(context_data):
-    """Sends the comparison data to Bedrock for a final analysis."""
     prompt = f"""
     You are an expert financial analyst. Based *only* on the data provided below, compare the following stocks.
-    1. Analyze their stability (using Beta, where >1 is more volatile than the market, <1 is less).
-    2. Analyze their valuation (using P/E Ratio, where higher is more 'expensive').
-    3. Briefly summarize the sentiment from their recent news.
-    4. Conclude with a summary of the risk/return profile for each stock. For example, which stock might offer more return but with higher risk (higher Beta), and which seems to be the most stable or 'safest' investment and why.
-
-    <data>
-    {context_data}
-    </data>
-
-    Analysis:
-    """
+    1. Analyze their stability (using Beta).
+    2. Analyze their valuation (using P/E Ratio).
+    3. Summarize sentiment from recent news.
+    4. Conclude with a summary of the risk/return profile for each stock and which seems 'safer' or 'more stable'.
+    <data>{context_data}</data>
+    Analysis:"""
     modelId = 'anthropic.claude-3-sonnet-20240229-v1:0'
     body = json.dumps({
         "anthropic_version": "bedrock-2023-05-31", "max_tokens": 1024,
@@ -164,15 +167,21 @@ def get_comparative_ai_analysis(context_data):
     response_body = json.loads(response.get('body').read())
     return response_body.get('content')[0].get('text')
 
+
 # --- Main Dashboard Layout ---
 
-# Load all data from AWS at the beginning
-data_load_state = st.text('Loading agent data from AWS...')
-df_reddit = load_raw_data_with_timestamps(S3_BUCKET_NAME)
-analysis_data = load_latest_analysis(S3_BUCKET_NAME)
-data_load_state.text('Data loading complete! ✅')
+# Load data - this will fail gracefully if creds are missing now
+try:
+    data_load_state = st.text('Loading agent data from AWS...')
+    df_reddit = load_raw_data_with_timestamps(S3_BUCKET_NAME)
+    analysis_data = load_latest_analysis(S3_BUCKET_NAME)
+    data_load_state.text('Data loading complete! ✅')
+except Exception as e:
+    st.error(f"Failed to load data from AWS. Check credentials and permissions. Error: {e}")
+    st.stop() # Stop if initial data load fails
 
-# --- Section 1: Live Stock Analyzer (with Time Range & Indicator) ---
+# --- (The rest of the dashboard layout code is exactly the same) ---
+# --- Section 1: Live Stock Analyzer ---
 st.header("Live Stock Analyzer 📈")
 with st.form("stock_analyzer_form"):
     stock_symbol = st.text_input("Enter a stock ticker (e.g., TSLA, AAPL, MSFT)", "TSLA")
@@ -181,126 +190,92 @@ with st.form("stock_analyzer_form"):
         ('5d', '1mo', '6mo', '1y', 'max'), index=2, horizontal=True, key="analyzer_time"
     )
     submitted = st.form_submit_button("Analyze Stock")
-
+# ... (rest of analyzer section code) ...
 if submitted and stock_symbol:
     try:
         ticker = yf.Ticker(stock_symbol)
         hist_chart = ticker.history(period=time_period)
         hist_metric = ticker.history(period="2d")
-
-        if hist_metric.empty:
-            raise ValueError("No recent history found for metric calculation. Check ticker.")
-        if hist_chart.empty:
-             raise ValueError(f"No history found for the selected period ({time_period}). Check ticker.")
-
+        if hist_metric.empty: raise ValueError("No recent history for metric.")
+        if hist_chart.empty: raise ValueError(f"No history for period ({time_period}).")
         current_price = hist_metric['Close'].iloc[-1]
-        # Ensure there are at least 2 data points for delta calculation
         prev_close = hist_metric['Close'].iloc[-2] if len(hist_metric['Close']) > 1 else current_price
         price_delta = current_price - prev_close
-
         news = ticker.news
-        ai_summary = "No recent news found for this ticker."
+        ai_summary = "No recent news found."
         if news:
-            with st.spinner("Generating AI news summary..."):
-                ai_summary = summarize_stock_news(news)
-
+            with st.spinner("Generating AI news summary..."): ai_summary = summarize_stock_news(news)
         st.subheader(f"{ticker.info.get('longName', stock_symbol.upper())} Analysis")
         col1, col2 = st.columns(2)
-        with col1:
-            st.metric(label="Current Share Price", value=f"${current_price:,.2f}", delta=f"${price_delta:,.2f} (Today)")
-        with col2:
-            st.info(f"**🧠 AI News Summary:**\n\n{ai_summary}")
-
+        with col1: st.metric(label="Current Share Price", value=f"${current_price:,.2f}", delta=f"${price_delta:,.2f} (Today)")
+        with col2: st.info(f"**🧠 AI News Summary:**\n\n{ai_summary}")
         st.subheader(f"Price Chart ({time_period})")
-        st.line_chart(hist_chart['Close'], use_container_width=True) # Corrected chart call
-
-    except Exception as e:
-        st.error(f"Could not retrieve data for {stock_symbol}. Error: {e}")
+        st.line_chart(hist_chart['Close'], use_container_width=True)
+    except Exception as e: st.error(f"Could not retrieve data for {stock_symbol}. Error: {e}")
 
 st.divider()
-
 # --- Section 2: Live Stock Comparator ---
 st.header("Live Stock Comparator 📊")
 with st.form("stock_comparator_form"):
     ticker_input = st.text_input("Enter stock tickers (comma-separated, e.g., TSLA, AAPL, MSFT)", "TSLA, GOOG")
-    time_period_comp = st.radio(
-        "Select time period:",
-        ('1mo', '6mo', '1y', '5y', 'max'), index=2, horizontal=True, key="comparator_time"
-    )
+    time_period_comp = st.radio("Select time period:", ('1mo', '6mo', '1y', '5y', 'max'), index=2, horizontal=True, key="comparator_time")
     submitted_compare = st.form_submit_button("Compare Stocks")
-
+# ... (rest of comparator section code) ...
 if submitted_compare and ticker_input:
     tickers_list = [t.strip().upper() for t in ticker_input.split(',')]
     try:
-        # Normalize data for comparison starting at 0%
         hist_comp = yf.download(tickers_list, period=time_period_comp)['Close']
-        if hist_comp.empty:
-             raise ValueError("No data returned. Check ticker symbols.")
-        # Calculate percentage change relative to the start of the period
+        if hist_comp.empty: raise ValueError("No data returned.")
         normalized_hist = (hist_comp / hist_comp.iloc[0] - 1) * 100
-
         st.subheader(f"Normalized Price Chart Comparison (% Change, {time_period_comp})")
-        st.line_chart(normalized_hist, use_container_width=True) # Corrected chart call
-
+        st.line_chart(normalized_hist, use_container_width=True)
         with st.spinner("Generating AI comparison..."):
             comparison_context = get_data_for_ai_comparison(tickers_list)
             ai_comparison = get_comparative_ai_analysis(comparison_context)
             st.subheader("🤖 AI Comparative Analysis (Risk vs. Return)")
             st.info(ai_comparison)
-
-    except Exception as e:
-        st.error(f"Could not retrieve data for comparison. Error: {e}")
+    except Exception as e: st.error(f"Could not retrieve data for comparison. Error: {e}")
 
 st.divider()
-
 # --- Section 3: AI Risk Assessment (from background agent) ---
 st.header("Reddit/News Sentiment Risk Assessment (Background Agent)")
+# ... (rest of risk assessment section code) ...
 if analysis_data:
     alert_type = analysis_data.get("alert_type", "N/A")
-    color = "red" if alert_type == "High Risk" else ("orange" if alert_type == "Medium Risk" else "green") # Added Medium Risk color
+    color = "red" if alert_type == "High Risk" else ("orange" if alert_type == "Medium Risk" else "green")
     st.subheader(f"Overall Market Alert Status: :{color}[{alert_type}]")
     col1, col2 = st.columns(2)
-    with col1:
-        st.metric(label="Overall Sentiment Trend", value=analysis_data.get("sentiment_trend", "N/A"))
-    with col2:
-        st.info(f"**🧠 Agent Reasoning (Reddit/News):**\n\n{analysis_data.get('reasoning', 'No reasoning provided.')}")
-else:
-    st.warning("No background agent analysis found yet.")
+    with col1: st.metric(label="Overall Sentiment Trend", value=analysis_data.get("sentiment_trend", "N/A"))
+    with col2: st.info(f"**🧠 Agent Reasoning (Reddit/News):**\n\n{analysis_data.get('reasoning', 'No reasoning provided.')}")
+else: st.warning("No background agent analysis found yet.")
 
 st.divider()
-
 # --- Section 4: Interactive Q&A (about Reddit/News data) ---
 st.header("Ask the Agent About Background Data")
+# ... (rest of Q&A section code) ...
 with st.form("qa_form"):
     user_question = st.text_input("E.g., 'Summarize the main topics discussed recently.'")
     submitted_qa = st.form_submit_button("Ask Agent")
 if submitted_qa and user_question and not df_reddit.empty:
     with st.spinner("Thinking..."):
-        # Combine titles and text for better context
         context_data = "\n".join(df_reddit['title'].dropna().astype(str) + ": " + df_reddit['text'].dropna().astype(str))
-        ai_answer = ask_bedrock_question(user_question, context_data[:15000]) # Increased context limit
+        ai_answer = ask_bedrock_question(user_question, context_data[:15000])
         st.info(f"**🤖 Agent's Answer:**\n\n{ai_answer}")
 
 st.divider()
-
 # --- Section 5: Background Data Visualizations ---
 st.header("Background Data Visualizations (Reddit/News)")
+# ... (rest of visualizations section code) ...
 if not df_reddit.empty:
-    # Filter out potential non-string data before analysis
     df_reddit_filtered = df_reddit[df_reddit['title'].apply(lambda x: isinstance(x, str))]
     if not df_reddit_filtered.empty:
         df_reddit_filtered["sentiment_label"] = df_reddit_filtered["title"].apply(analyze_sentiment)
         df_reddit_filtered["sentiment_score"] = df_reddit_filtered["title"].apply(get_sentiment_score)
-        
         st.subheader("Sentiment Trend Over Time (Background Data)")
-        # Ensure timestamp is datetime before resampling
         df_reddit_filtered['timestamp'] = pd.to_datetime(df_reddit_filtered['timestamp'])
         time_series_df = df_reddit_filtered.set_index('timestamp').resample('15Min')['sentiment_score'].mean().dropna()
-        if not time_series_df.empty:
-            st.line_chart(time_series_df)
-        else:
-            st.warning("Not enough data points to plot sentiment trend.")
-
+        if not time_series_df.empty: st.line_chart(time_series_df)
+        else: st.warning("Not enough data for trend.")
         col1, col2 = st.columns(2)
         with col1:
             st.subheader("Sentiment Distribution")
@@ -308,24 +283,15 @@ if not df_reddit.empty:
             if not sentiment_counts.empty:
                 fig_pie = px.pie(sentiment_counts, values=sentiment_counts.values, names=sentiment_counts.index)
                 st.plotly_chart(fig_pie, use_container_width=True)
-            else:
-                 st.warning("No sentiment labels to plot.")
-
+            else: st.warning("No sentiment labels.")
         with col2:
             st.subheader("Trending Topics Word Cloud")
             text = " ".join(title for title in df_reddit_filtered.title.dropna())
             if text:
                 wordcloud = WordCloud(width=800, height=400, background_color=None, colormap='viridis').generate(text)
-                fig_wc, ax = plt.subplots()
-                ax.imshow(wordcloud, interpolation='bilinear')
-                ax.axis("off")
-                st.pyplot(fig_wc)
-            else:
-                st.warning("No text available for word cloud.")
-    else:
-        st.warning("No valid text data found for visualization.")
-
+                fig_wc, ax = plt.subplots(); ax.imshow(wordcloud, interpolation='bilinear'); ax.axis("off"); st.pyplot(fig_wc)
+            else: st.warning("No text for word cloud.")
+    else: st.warning("No valid text data for visualization.")
     st.subheader("Latest Raw Background Data")
-    st.dataframe(df_reddit) # Show original df here
-else:
-    st.warning("No raw data found in the S3 bucket.")
+    st.dataframe(df_reddit)
+else: st.warning("No raw data found in S3.")
