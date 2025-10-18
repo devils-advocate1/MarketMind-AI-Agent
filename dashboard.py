@@ -8,7 +8,14 @@ from wordcloud import WordCloud
 import matplotlib.pyplot as plt
 from datetime import datetime
 import yfinance as yf
+import os
 
+
+st.write("--- Environment Variables ---")
+st.write(f"AWS Access Key ID Env Var Set: {'AWS_ACCESS_KEY_ID' in os.environ}")
+st.write(f"AWS Secret Key Env Var Set: {'AWS_SECRET_ACCESS_KEY' in os.environ}")
+st.write(f"AWS Region Env Var Set: {'AWS_DEFAULT_REGION' in os.environ or 'AWS_REGION' in os.environ}")
+st.write("--------------------------")
 # --- AWS & Page Configuration ---
 S3_BUCKET_NAME = "marketmind-raw-data-ramij-2025"
 
@@ -24,7 +31,7 @@ st.write("Live analysis powered by AWS Bedrock & yfinance. Background sentiment 
 @st.cache_data(ttl=600) # Cache S3 data for 10 minutes
 def load_raw_data_with_timestamps(bucket_name):
     """Loads raw data and extracts timestamps from S3 filenames."""
-    s3 = boto3.client('s3') # S3 client usually infers region correctly
+    s3 = boto3.client('s3', region_name='ap-south-1') # S3 client usually infers region correctly
     objects = s3.list_objects_v2(Bucket=bucket_name, Prefix="raw/")
     if 'Contents' not in objects:
         return pd.DataFrame()
@@ -50,7 +57,7 @@ def load_raw_data_with_timestamps(bucket_name):
 @st.cache_data(ttl=600)
 def load_latest_analysis(bucket_name):
     """Loads the most recent analysis file from the 'processed/' folder."""
-    s3 = boto3.client('s3')
+    s3 = boto3.client('s3', region_name='ap-south-1')
     objects = s3.list_objects_v2(Bucket=bucket_name, Prefix="processed/")
     if 'Contents' not in objects: return None
     latest_file = max(objects['Contents'], key=lambda x: x['LastModified'])
