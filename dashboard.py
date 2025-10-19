@@ -12,48 +12,43 @@ from datetime import datetime
 import yfinance as yf
 from prophet import Prophet
 import os
+import numpy as np # Import numpy for calculations
 
 # --- AWS & Page Configuration ---
 S3_BUCKET_NAME = "marketmind-raw-data-ramij-2025"
 AWS_REGION = "ap-south-1" # Define region
 
-# --- CORRECTED: Conditional Credential Loading ---
+# --- Conditional Credential Loading ---
 aws_creds = {"region_name": AWS_REGION} # Start with just the region
 is_deployed = False
-
 try:
     # Try accessing secrets - this will only work on Streamlit Cloud
     if "aws" in st.secrets:
         aws_creds["aws_access_key_id"] = st.secrets["aws"]["aws_access_key_id"]
         aws_creds["aws_secret_access_key"] = st.secrets["aws"]["aws_secret_access_key"]
         is_deployed = True
-        # st.info("Credentials loaded from Streamlit Secrets.") # Optional confirmation
 except Exception:
     # If secrets don't exist or fail, assume running locally
-    # st.info("Running locally. Using AWS credentials from config.") # Optional confirmation
     pass # Boto3 will handle finding local credentials automatically
 
 # Initialize clients using the determined credentials/region
-# If aws_creds only has region_name (local), boto3 handles credential finding
 try:
     bedrock = boto3.client('bedrock-runtime', **aws_creds)
     # S3 client created in functions will also use aws_creds
 except Exception as e:
-     st.error(f"Failed to initialize AWS clients. Ensure credentials are configured correctly. Error: {e}")
+     st.error(f"Failed AWS client init. Ensure credentials configured. Error: {e}")
      st.stop()
-
 
 st.set_page_config(page_title="MarketMind Dashboard", layout="wide")
 st.title("🧠 MarketMind: AI Financial Risk & Sentiment Agent")
-st.write(f"Live analysis powered by AWS Bedrock & yfinance. Background sentiment analysis from Reddit/News. {'(Deployed Mode)' if is_deployed else '(Local Mode)'}")
-
+st.write(f"Live analysis by AWS Bedrock & yfinance. Background sentiment by Reddit/News. {'(Deployed)' if is_deployed else '(Local)'}")
 
 # --- Helper Functions ---
-# (Includes all previous functions: load_raw_data..., load_latest_analysis..., analyze_sentiment..., etc.)
 
 @st.cache_data(ttl=600)
 def load_raw_data_with_timestamps(bucket_name):
-    s3 = boto3.client('s3', **aws_creds) # Pass creds/region
+    """Loads raw data and extracts timestamps from S3 filenames."""
+    s3 = boto3.client('s3', **aws_creds)
     objects = s3.list_objects_v2(Bucket=bucket_name, Prefix="raw/")
     if 'Contents' not in objects: return pd.DataFrame()
     all_posts = []; files_to_load = sorted(objects['Contents'], key=lambda x: x['LastModified'], reverse=True)[:50]
@@ -68,7 +63,8 @@ def load_raw_data_with_timestamps(bucket_name):
 
 @st.cache_data(ttl=600)
 def load_latest_analysis(bucket_name):
-    s3 = boto3.client('s3', **aws_creds) # Pass creds/region
+    """Loads the most recent analysis file from the 'processed/' folder."""
+    s3 = boto3.client('s3', **aws_creds)
     objects = s3.list_objects_v2(Bucket=bucket_name, Prefix="processed/")
     if 'Contents' not in objects: return None
     latest_file = max(objects['Contents'], key=lambda x: x['LastModified'])
@@ -78,8 +74,8 @@ def load_latest_analysis(bucket_name):
 def analyze_sentiment(text):
     if not isinstance(text, str): return "Neutral"
     analysis = TextBlob(text); polarity = analysis.sentiment.polarity
-    if polarity > 0.1: return "Positive"
-    elif polarity < -0.1: return "Negative"
+    if polarity > 0.1: return "Positive"; 
+    elif polarity < -0.1: return "Negative"; 
     else: return "Neutral"
 
 def get_sentiment_score(text):
@@ -112,8 +108,7 @@ def get_data_for_ai_comparison(tickers_list):
             news = ticker.news; count = 0
             if news:
                 for item in news:
-                    if count >= 3: break
-                    title = item.get('title', '')
+                    if count >= 3: break; title = item.get('title', '');
                     if title: all_data += f"- {title}\n"; count += 1
             if count == 0: all_data += "No recent news found.\n"
         except Exception as e: all_data += f"Could not get info for {ticker_str}. Error: {e}\n"
@@ -126,81 +121,103 @@ def get_comparative_ai_analysis(context_data):
     response = bedrock.invoke_model(body=body, modelId=modelId); response_body = json.loads(response.get('body').read())
     return response_body.get('content')[0].get('text')
 
-@st.cache_data(ttl=1800) # Cache prediction for 30 minutes
+@st.cache_data(ttl=1800)
 def predict_next_day_price(stock_data):
-    """Uses Prophet to predict the next closing price."""
     try:
         df_prophet = stock_data.reset_index()[['Date', 'Close']].rename(columns={'Date': 'ds', 'Close': 'y'})
-        df_prophet['ds'] = pd.to_datetime(df_prophet['ds']).dt.tz_localize(None) # Ensure timezone naive
-        if len(df_prophet) < 2: return None # Prophet needs at least 2 data points
-        model = Prophet(daily_seasonality=False, weekly_seasonality=False, yearly_seasonality=True)
-        model.fit(df_prophet)
-        future = model.make_future_dataframe(periods=1)
-        forecast = model.predict(future)
+        df_prophet['ds'] = pd.to_datetime(df_prophet['ds']).dt.tz_localize(None)
+        if len(df_prophet) < 2: return None
+        model = Prophet(daily_seasonality=False, weekly_seasonality=False, yearly_seasonality=True); model.fit(df_prophet)
+        future = model.make_future_dataframe(periods=1); forecast = model.predict(future)
         return forecast['yhat'].iloc[-1]
+    except Exception as e: st.warning(f"Prophet prediction failed: {e}"); return None # Use warning instead of error
+
+def calculate_risk_score(hist_data, avg_volume_period=30):
+    """Calculates a simple risk score (0-100) based on recent volatility and volume."""
+    if hist_data.empty or len(hist_data) < avg_volume_period + 1: # Need enough data for rolling avg
+        st.warning(f"Not enough historical data ({len(hist_data)} days) to calculate risk score.")
+        return 0
+
+    try:
+        latest_return = hist_data['Close'].pct_change().iloc[-1]
+        latest_volume = hist_data['Volume'].iloc[-1]
+        # Calculate rolling average excluding the last day to avoid lookahead bias if needed, but simple avg is fine here
+        avg_volume = hist_data['Volume'].rolling(window=avg_volume_period).mean().iloc[-1] # Use last calculated avg
+        
+        if pd.isna(avg_volume) or avg_volume <= 0:
+             st.warning("Could not calculate average volume.")
+             return 0 # Handle cases with zero or NaN average volume
+             
+        volume_spike_ratio = latest_volume / avg_volume
+
+        raw_score = abs(latest_return * 100) * volume_spike_ratio
+        normalized_score = min(raw_score * 6.67, 100)
+
+        return int(normalized_score)
     except Exception as e:
-        st.error(f"Prophet prediction failed: {e}") # Show error in UI
-        return None
+        st.warning(f"Risk score calculation failed: {e}")
+        return 0
 
 # --- Main Dashboard Layout ---
 
-# Load data - handles potential cred errors
 try:
-    data_load_state = st.text('Loading agent data from AWS...')
-    df_reddit = load_raw_data_with_timestamps(S3_BUCKET_NAME)
-    analysis_data = load_latest_analysis(S3_BUCKET_NAME)
-    data_load_state.text('Data loading complete! ✅')
-except Exception as e:
-    st.error(f"Failed initial data load from AWS. Check credentials/permissions. Error: {e}")
-    st.stop() # Stop if initial data load fails
+    data_load_state = st.text('Loading agent data from AWS...'); df_reddit = load_raw_data_with_timestamps(S3_BUCKET_NAME); analysis_data = load_latest_analysis(S3_BUCKET_NAME); data_load_state.text('Data loading complete! ✅')
+except Exception as e: st.error(f"Failed initial data load from AWS. Check credentials/permissions. Error: {e}"); st.stop()
 
 # --- Section 1: Live Stock Analyzer ---
 st.header("Live Stock Analyzer 📈")
+st.caption("Enter a stock ticker. For Indian stocks, use suffix `.NS` (NSE) or `.BO` (BSE).")
 with st.form("stock_analyzer_form"):
-    stock_symbol = st.text_input("Enter stock ticker", "TSLA")
+    stock_symbol = st.text_input("Enter stock ticker", "RELIANCE.NS")
     time_period = st.radio("Select time period:",('5d', '1mo', '6mo', '1y', 'max'), index=3, horizontal=True, key="analyzer_time")
     submitted = st.form_submit_button("Analyze Stock")
 
 if submitted and stock_symbol:
     try:
-        ticker = yf.Ticker(stock_symbol); hist_chart = ticker.history(period=time_period); hist_metric = ticker.history(period="2d")
-        if hist_metric.empty or hist_chart.empty: raise ValueError("Ticker invalid/delisted.")
+        ticker = yf.Ticker(stock_symbol); hist_chart = ticker.history(period=time_period); hist_metric = ticker.history(period="2d"); hist_risk = ticker.history(period="35d")
+        if hist_metric.empty or hist_chart.empty or hist_risk.empty: raise ValueError("Ticker invalid/delisted or insufficient history.")
         current_price = hist_metric['Close'].iloc[-1]; prev_close = hist_metric['Close'].iloc[-2] if len(hist_metric['Close']) > 1 else current_price; price_delta = current_price - prev_close
         news = ticker.news; ai_summary = "No recent news."
         if news:
             with st.spinner("Generating AI news summary..."): ai_summary = summarize_stock_news(news)
         predicted_price = None
         with st.spinner("Generating prediction..."):
-             hist_for_prediction = ticker.history(period="1y") # Use 1y data for prediction
+             hist_for_prediction = ticker.history(period="1y")
              if not hist_for_prediction.empty: predicted_price = predict_next_day_price(hist_for_prediction)
+        risk_score = calculate_risk_score(hist_risk)
         st.subheader(f"{ticker.info.get('longName', stock_symbol.upper())} Analysis")
-        col1, col2, col3 = st.columns(3)
-        with col1: st.metric(label="Current Price", value=f"${current_price:,.2f}", delta=f"${price_delta:,.2f} (Today)")
-        with col2: pred_display = f"${predicted_price:,.2f}" if predicted_price is not None else "N/A"; st.metric(label="Predicted Next Close", value=pred_display)
-        with col3: st.info(f"**🧠 AI News Summary:**\n{ai_summary}")
+        col1, col2, col3, col4 = st.columns([1.5, 1, 1, 2])
+        with col1: st.metric(label="Current Price", value=f"₹{current_price:,.2f}" if ".NS" in stock_symbol.upper() or ".BO" in stock_symbol.upper() else f"${current_price:,.2f}", delta=f"{price_delta:,.2f} (Today)") # Basic currency check
+        with col2: pred_display = (f"₹{predicted_price:,.2f}" if ".NS" in stock_symbol.upper() or ".BO" in stock_symbol.upper() else f"${predicted_price:,.2f}") if predicted_price is not None else "N/A"; st.metric(label="Predicted Next Close", value=pred_display)
+        with col3:
+             gauge_fig = go.Figure(go.Indicator(mode = "gauge+number", value = risk_score, title = {'text': "Daily Risk Score"}, gauge = {'axis': {'range': [0, 100]}, 'bar': {'color': "darkblue"},'steps' : [{'range': [0, 40], 'color': "green"}, {'range': [40, 70], 'color': "yellow"}, {'range': [70, 100], 'color': "red"}]}))
+             gauge_fig.update_layout(height=250, margin=dict(l=10, r=10, t=50, b=10)); st.plotly_chart(gauge_fig, use_container_width=True)
+        with col4: st.info(f"**🧠 AI News Summary:**\n{ai_summary}")
         st.subheader(f"Price vs. Reddit Sentiment ({time_period})")
         if not df_reddit.empty:
             if "sentiment_score" not in df_reddit.columns: df_reddit["sentiment_score"] = df_reddit["title"].apply(get_sentiment_score)
-            df_reddit['timestamp'] = pd.to_datetime(df_reddit['timestamp']).dt.tz_localize(None); hist_chart.index = hist_chart.index.tz_localize(None) # Ensure timezone naive
-            # Filter sentiment data to match chart's time period
+            df_reddit['timestamp'] = pd.to_datetime(df_reddit['timestamp']).dt.tz_localize(None); hist_chart.index = hist_chart.index.tz_localize(None)
             start_date = hist_chart.index.min(); end_date = hist_chart.index.max()
             df_reddit_filtered_time = df_reddit[(df_reddit['timestamp'] >= start_date) & (df_reddit['timestamp'] <= end_date)]
-            daily_sentiment = df_reddit_filtered_time.set_index('timestamp')['sentiment_score'].resample('D').mean().dropna()
-            combined_df = hist_chart.join(daily_sentiment)
-            fig = make_subplots(specs=[[{"secondary_y": True}]])
-            fig.add_trace(go.Scatter(x=combined_df.index, y=combined_df['Close'], name="Price", line=dict(color='blue')), secondary_y=False)
-            fig.add_trace(go.Scatter(x=combined_df.index, y=combined_df['sentiment_score'], name="Reddit Sentiment", line=dict(color='orange', dash='dot')), secondary_y=True)
-            fig.update_layout(title_text=f"{stock_symbol.upper()} Price vs. Avg Daily Reddit Sentiment"); fig.update_yaxes(title_text="Price ($)", secondary_y=False); fig.update_yaxes(title_text="Sentiment Score", secondary_y=True, range=[-1, 1])
-            st.plotly_chart(fig, use_container_width=True)
-        else: st.warning("No Reddit data for overlay."); st.line_chart(hist_chart['Close'], use_container_width=True)
-    except Exception as e: st.error(f"Could not retrieve data/predict for {stock_symbol}. Error: {e}")
+            if not df_reddit_filtered_time.empty:
+                 daily_sentiment = df_reddit_filtered_time.set_index('timestamp')['sentiment_score'].resample('D').mean().dropna()
+                 combined_df = hist_chart.join(daily_sentiment)
+                 fig = make_subplots(specs=[[{"secondary_y": True}]])
+                 fig.add_trace(go.Scatter(x=combined_df.index, y=combined_df['Close'], name="Price", line=dict(color='blue')), secondary_y=False)
+                 fig.add_trace(go.Scatter(x=combined_df.index, y=combined_df['sentiment_score'], name="Reddit Sentiment", line=dict(color='orange', dash='dot')), secondary_y=True)
+                 fig.update_layout(title_text=f"{stock_symbol.upper()} Price vs. Avg Daily Reddit Sentiment"); fig.update_yaxes(title_text="Price", secondary_y=False); fig.update_yaxes(title_text="Sentiment Score", secondary_y=True, range=[-1, 1])
+                 st.plotly_chart(fig, use_container_width=True)
+            else: st.warning("No Reddit data within selected time period for overlay."); st.line_chart(hist_chart['Close'], use_container_width=True)
+        else: st.warning("No Reddit data available for overlay."); st.line_chart(hist_chart['Close'], use_container_width=True)
+    except Exception as e: st.error(f"Could not retrieve/analyze data for {stock_symbol}. Error: {e}")
 
 st.divider()
 
 # --- Section 2: Live Stock Comparator ---
 st.header("Live Stock Comparator 📊")
+st.caption("Enter stock tickers (comma-separated). Use `.NS` (NSE) or `.BO` (BSE) for Indian stocks.")
 with st.form("stock_comparator_form"):
-    ticker_input = st.text_input("Enter stock tickers (comma-separated)", "TSLA, GOOG")
+    ticker_input = st.text_input("Enter stock tickers", "RELIANCE.NS, TCS.NS, INFY.NS")
     time_period_comp = st.radio("Select time period:", ('1mo', '6mo', '1y', '5y', 'max'), index=2, horizontal=True, key="comparator_time")
     submitted_compare = st.form_submit_button("Compare Stocks")
 if submitted_compare and ticker_input:
@@ -237,7 +254,7 @@ with st.form("qa_form"):
     submitted_qa = st.form_submit_button("Ask Agent")
 if submitted_qa and user_question and not df_reddit.empty:
     with st.spinner("Thinking..."):
-        context_data = "\n".join([str(item) for item in df_reddit['title'].dropna()]) # Explicitly converts each item
+        context_data = "\n".join(df_reddit['title'].dropna().astype(str) + ": " + df_reddit['text'].dropna().astype(str))
         ai_answer = ask_bedrock_question(user_question, context_data[:15000])
         st.info(f"**🤖 Agent's Answer:**\n\n{ai_answer}")
 st.divider()
@@ -250,15 +267,17 @@ if not df_reddit.empty:
         df_reddit_filtered["sentiment_label"] = df_reddit_filtered["title"].apply(analyze_sentiment)
         df_reddit_filtered["sentiment_score"] = df_reddit_filtered["title"].apply(get_sentiment_score)
         st.subheader("Sentiment Trend Over Time (Background Data)")
-        df_reddit_filtered['timestamp'] = pd.to_datetime(df_reddit_filtered['timestamp']).dt.tz_localize(None) # Make timezone naive
-        # Check if index is datetime before resampling
+        df_reddit_filtered['timestamp'] = pd.to_datetime(df_reddit_filtered['timestamp'], errors='coerce').dt.tz_localize(None) # Coerce errors, ensure timezone naive
+        df_reddit_filtered.dropna(subset=['timestamp'], inplace=True) # Drop rows where conversion failed
         if pd.api.types.is_datetime64_any_dtype(df_reddit_filtered['timestamp']):
-             time_series_df = df_reddit_filtered.set_index('timestamp')['sentiment_score'].resample('15Min').mean().dropna()
-             if not time_series_df.empty: st.line_chart(time_series_df)
-             else: st.warning("Not enough data points for trend after resampling.")
+             try:
+                 time_series_df = df_reddit_filtered.set_index('timestamp')['sentiment_score'].resample('15Min').mean().dropna()
+                 if not time_series_df.empty: st.line_chart(time_series_df)
+                 else: st.warning("No data points for trend after resampling.")
+             except Exception as e:
+                 st.warning(f"Could not resample time series data: {e}")
         else:
              st.warning("Timestamp column not in correct format for trend analysis.")
-
         col1, col2 = st.columns(2)
         with col1:
             st.subheader("Sentiment Distribution"); sentiment_counts = df_reddit_filtered['sentiment_label'].value_counts()
@@ -267,7 +286,10 @@ if not df_reddit.empty:
         with col2:
             st.subheader("Trending Topics Word Cloud"); text = " ".join(title for title in df_reddit_filtered.title.dropna())
             if text:
-                wordcloud = WordCloud(width=800, height=400, background_color=None, colormap='viridis').generate(text); fig_wc, ax = plt.subplots(); ax.imshow(wordcloud, interpolation='bilinear'); ax.axis("off"); st.pyplot(fig_wc)
+                try: # Add error handling for wordcloud generation
+                    wordcloud = WordCloud(width=800, height=400, background_color=None, colormap='viridis').generate(text); fig_wc, ax = plt.subplots(); ax.imshow(wordcloud, interpolation='bilinear'); ax.axis("off"); st.pyplot(fig_wc)
+                except Exception as e:
+                     st.warning(f"Could not generate word cloud: {e}")
             else: st.warning("No text for word cloud.")
     else: st.warning("No valid text data for visualization.")
     st.subheader("Latest Raw Background Data")
