@@ -3,7 +3,7 @@ import os
 import boto3
 import urllib3
 
-# Initialize clients
+
 s3 = boto3.client('s3')
 bedrock = boto3.client('bedrock-runtime')
 http = urllib3.PoolManager()
@@ -26,13 +26,13 @@ def lambda_handler(event, context):
     """
     print("--- MarketMind Analyzer Agent: Activated ---")
 
-    # Step 1: Get file details from S3 trigger
+    
     bucket_name = event['Records'][0]['s3']['bucket']['name']
     file_key = event['Records'][0]['s3']['object']['key']
     print(f"New file detected: s3://{bucket_name}/{file_key}")
 
     try:
-        # Step 2 & 3: Read data and build prompt (same as before)
+        
         response = s3.get_object(Bucket=bucket_name, Key=file_key)
         content = response['Body'].read().decode('utf-8')
         posts = json.loads(content)
@@ -43,7 +43,7 @@ def lambda_handler(event, context):
         Data: <data>{text_to_analyze[:10000]}</data>
         """
 
-        # Step 4: Call Bedrock AI model (same as before)
+        
         modelId = 'anthropic.claude-3-sonnet-20240229-v1:0'
         body = json.dumps({
             "anthropic_version": "bedrock-2023-05-31", "max_tokens": 512,
@@ -58,8 +58,8 @@ def lambda_handler(event, context):
         
         ai_decision = json.loads(ai_response_text)
         
-        # --- NEW: Step 5 - Save the AI's decision back to S3 ---
-        # Create a new filename for the processed data
+        
+        
         processed_file_key = file_key.replace("raw/raw_reddit_data_", "processed/analysis_")
         
         s3.put_object(
@@ -69,7 +69,7 @@ def lambda_handler(event, context):
         )
         print(f"AI analysis saved to s3://{bucket_name}/{processed_file_key}")
 
-        # Step 6: Parse the AI response and take action (same as before)
+        
         if ai_decision.get("alert_type") == "High Risk":
             print("High risk detected. Preparing Telegram alert.")
             alert_message = (

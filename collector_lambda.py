@@ -5,15 +5,15 @@ import praw
 import urllib3
 from datetime import datetime
 
-# Initialize clients
+
 s3 = boto3.client('s3')
 http = urllib3.PoolManager()
 
 def get_reddit_posts(limit=25):
     """Fetches post data from Reddit."""
     print("Collecting data from Reddit...")
-    # This is the full, correct function
-    posts_data = [] # Initialize the list
+    
+    posts_data = [] 
     reddit = praw.Reddit(
         client_id=os.environ['REDDIT_CLIENT_ID'],
         client_secret=os.environ['REDDIT_CLIENT_SECRET'],

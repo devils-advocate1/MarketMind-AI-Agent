@@ -12,29 +12,28 @@ from datetime import datetime
 import yfinance as yf
 from prophet import Prophet
 import os
-import numpy as np # Import numpy for calculations
+import numpy as np 
 
-# --- AWS & Page Configuration ---
+
 S3_BUCKET_NAME = "marketmind-raw-data-ramij-2025"
-AWS_REGION = "ap-south-1" # Define region
+AWS_REGION = "ap-south-1" 
 
-# --- Conditional Credential Loading ---
-aws_creds = {"region_name": AWS_REGION} # Start with just the region
+
+aws_creds = {"region_name": AWS_REGION} 
 is_deployed = False
 try:
-    # Try accessing secrets - this will only work on Streamlit Cloud
+    
     if "aws" in st.secrets:
         aws_creds["aws_access_key_id"] = st.secrets["aws"]["aws_access_key_id"]
         aws_creds["aws_secret_access_key"] = st.secrets["aws"]["aws_secret_access_key"]
         is_deployed = True
 except Exception:
-    # If secrets don't exist or fail, assume running locally
-    pass # Boto3 will handle finding local credentials automatically
+ 
+    pass 
 
-# Initialize clients using the determined credentials/region
 try:
     bedrock = boto3.client('bedrock-runtime', **aws_creds)
-    # S3 client created in functions will also use aws_creds
+    
 except Exception as e:
      st.error(f"Failed AWS client init. Ensure credentials configured. Error: {e}")
      st.stop()
@@ -43,7 +42,7 @@ st.set_page_config(page_title="MarketMind Dashboard", layout="wide")
 st.title("🧠 MarketMind: AI Financial Risk & Sentiment Agent")
 st.write(f"Live analysis by AWS Bedrock & yfinance. Background sentiment by Reddit/News. {'(Deployed)' if is_deployed else '(Local)'}")
 
-# --- Helper Functions ---
+
 
 @st.cache_data(ttl=600)
 def load_raw_data_with_timestamps(bucket_name):
@@ -130,23 +129,23 @@ def predict_next_day_price(stock_data):
         model = Prophet(daily_seasonality=False, weekly_seasonality=False, yearly_seasonality=True); model.fit(df_prophet)
         future = model.make_future_dataframe(periods=1); forecast = model.predict(future)
         return forecast['yhat'].iloc[-1]
-    except Exception as e: st.warning(f"Prophet prediction failed: {e}"); return None # Use warning instead of error
+    except Exception as e: st.warning(f"Prophet prediction failed: {e}"); return None 
 
 def calculate_risk_score(hist_data, avg_volume_period=30):
     """Calculates a simple risk score (0-100) based on recent volatility and volume."""
-    if hist_data.empty or len(hist_data) < avg_volume_period + 1: # Need enough data for rolling avg
+    if hist_data.empty or len(hist_data) < avg_volume_period + 1: 
         st.warning(f"Not enough historical data ({len(hist_data)} days) to calculate risk score.")
         return 0
 
     try:
         latest_return = hist_data['Close'].pct_change().iloc[-1]
         latest_volume = hist_data['Volume'].iloc[-1]
-        # Calculate rolling average excluding the last day to avoid lookahead bias if needed, but simple avg is fine here
-        avg_volume = hist_data['Volume'].rolling(window=avg_volume_period).mean().iloc[-1] # Use last calculated avg
+       
+        avg_volume = hist_data['Volume'].rolling(window=avg_volume_period).mean().iloc[-1] 
         
         if pd.isna(avg_volume) or avg_volume <= 0:
              st.warning("Could not calculate average volume.")
-             return 0 # Handle cases with zero or NaN average volume
+             return 0 
              
         volume_spike_ratio = latest_volume / avg_volume
 
@@ -158,13 +157,13 @@ def calculate_risk_score(hist_data, avg_volume_period=30):
         st.warning(f"Risk score calculation failed: {e}")
         return 0
 
-# --- Main Dashboard Layout ---
+
 
 try:
     data_load_state = st.text('Loading agent data from AWS...'); df_reddit = load_raw_data_with_timestamps(S3_BUCKET_NAME); analysis_data = load_latest_analysis(S3_BUCKET_NAME); data_load_state.text('Data loading complete! ✅')
 except Exception as e: st.error(f"Failed initial data load from AWS. Check credentials/permissions. Error: {e}"); st.stop()
 
-# --- Section 1: Live Stock Analyzer ---
+
 st.header("Live Stock Analyzer 📈")
 st.caption("Enter a stock ticker. For Indian stocks, use suffix `.NS` (NSE) or `.BO` (BSE).")
 with st.form("stock_analyzer_form"):
@@ -213,7 +212,7 @@ if submitted and stock_symbol:
 
 st.divider()
 
-# --- Section 2: Live Stock Comparator ---
+
 st.header("Live Stock Comparator 📊")
 st.caption("Enter stock tickers (comma-separated). Use `.NS` (NSE) or `.BO` (BSE) for Indian stocks.")
 with st.form("stock_comparator_form"):
@@ -236,7 +235,6 @@ if submitted_compare and ticker_input:
 
 st.divider()
 
-# --- Section 3: AI Risk Assessment (from background agent) ---
 st.header("Reddit/News Sentiment Risk Assessment (Background Agent)")
 if analysis_data:
     alert_type = analysis_data.get("alert_type", "N/A"); color = "red" if alert_type == "High Risk" else ("orange" if alert_type == "Medium Risk" else "green")
@@ -247,19 +245,21 @@ if analysis_data:
 else: st.warning("No background agent analysis found yet.")
 st.divider()
 
-# --- Section 4: Interactive Q&A (about Reddit/News data) ---
+
 st.header("Ask the Agent About Background Data")
 with st.form("qa_form"):
     user_question = st.text_input("E.g., 'Summarize the main topics discussed recently.'")
     submitted_qa = st.form_submit_button("Ask Agent")
 if submitted_qa and user_question and not df_reddit.empty:
     with st.spinner("Thinking..."):
-        context_data = "\n".join(df_reddit['title'].dropna().astype(str) + ": " + df_reddit['text'].dropna().astype(str))
+        titles = df_reddit['title'].fillna('').astype(str)
+        texts = df_reddit['text'].fillna('').astype(str)
+        context_data = "\n".join((titles + ": " + texts).tolist())
         ai_answer = ask_bedrock_question(user_question, context_data[:15000])
         st.info(f"**🤖 Agent's Answer:**\n\n{ai_answer}")
 st.divider()
 
-# --- Section 5: Background Data Visualizations ---
+
 st.header("Background Data Visualizations (Reddit/News)")
 if not df_reddit.empty:
     df_reddit_filtered = df_reddit[df_reddit['title'].apply(lambda x: isinstance(x, str))]
@@ -268,7 +268,7 @@ if not df_reddit.empty:
         df_reddit_filtered["sentiment_score"] = df_reddit_filtered["title"].apply(get_sentiment_score)
         st.subheader("Sentiment Trend Over Time (Background Data)")
         df_reddit_filtered['timestamp'] = pd.to_datetime(df_reddit_filtered['timestamp'], errors='coerce').dt.tz_localize(None) # Coerce errors, ensure timezone naive
-        df_reddit_filtered.dropna(subset=['timestamp'], inplace=True) # Drop rows where conversion failed
+        df_reddit_filtered.dropna(subset=['timestamp'], inplace=True) 
         if pd.api.types.is_datetime64_any_dtype(df_reddit_filtered['timestamp']):
              try:
                  time_series_df = df_reddit_filtered.set_index('timestamp')['sentiment_score'].resample('15Min').mean().dropna()
@@ -286,12 +286,12 @@ if not df_reddit.empty:
         with col2:
             st.subheader("Trending Topics Word Cloud"); text = " ".join(title for title in df_reddit_filtered.title.dropna())
             if text:
-                try: # Add error handling for wordcloud generation
+                try: 
                     wordcloud = WordCloud(width=800, height=400, background_color=None, colormap='viridis').generate(text); fig_wc, ax = plt.subplots(); ax.imshow(wordcloud, interpolation='bilinear'); ax.axis("off"); st.pyplot(fig_wc)
                 except Exception as e:
                      st.warning(f"Could not generate word cloud: {e}")
             else: st.warning("No text for word cloud.")
     else: st.warning("No valid text data for visualization.")
     st.subheader("Latest Raw Background Data")
-    st.dataframe(df_reddit) # Show original df here
+    st.dataframe(df_reddit) 
 else: st.warning("No raw data found in S3.")
